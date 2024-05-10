@@ -2,7 +2,10 @@
 #define PROTON_DRIVER_GPU_ROCTRACER_H_
 
 #include <roctracer/roctracer.h>
-#include <roctracer/roctracer_ext.h>
+// FIXME: remove me, included from RoctracerProfiler.cpp to avoid build issue
+//#include <roctracer/roctracer_ext.h>
+//#include <roctracer/roctracer_hip.h>
+//#include <roctracer/roctracer_hsa.h>
 
 namespace proton {
 
@@ -52,7 +55,14 @@ roctracer_status_t open_pool(
     const roctracer_properties_t* properties);
 
 template <bool CheckSuccess>
+roctracer_status_t open_pool_expl(
+    const roctracer_properties_t* properties, roctracer_pool_t** pool);
+
+template <bool CheckSuccess>
 roctracer_status_t close_pool();
+
+template <bool CheckSuccess>
+roctracer_status_t close_pool_expl(roctracer_pool_t* pool);
 
 template <bool CheckSuccess>
 roctracer_status_t enable_op_activity(
@@ -61,6 +71,10 @@ roctracer_status_t enable_op_activity(
 template <bool CheckSuccess>
 roctracer_status_t enable_domain_activity(
     activity_domain_t domain);
+
+template <bool CheckSuccess>
+roctracer_status_t enable_domain_activity_expl(
+    activity_domain_t domain, roctracer_pool_t* pool);
 
 template <bool CheckSuccess>
 roctracer_status_t disable_op_activity(

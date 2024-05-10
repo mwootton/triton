@@ -11,7 +11,7 @@ DEFAULT_PROFILE_NAME = "proton"
 def start(
     name: Optional[str] = None,
     *,
-    backend: str = "cupti",
+    backend: str = "roctracer",
     context: str = "shadow",
     data: str = "tree",
     hook: Optional[str] = None,
@@ -106,7 +106,7 @@ def finalize(session: Optional[int] = None, output_format: str = "hatchet") -> N
 def _profiling(
     func,
     name: Optional[str] = None,
-    backend: str = "cupti",
+    backend: str = "roctracer",
     context: str = "shadow",
     data: str = "tree",
     hook: Optional[str] = None,
@@ -135,7 +135,7 @@ def profile(
     func=None,
     *,
     name: Optional[str] = None,
-    backend: str = "cupti",
+    backend: str = "roctracer",
     context: str = "shadow",
     data: str = "tree",
     hook: Optional[str] = None,

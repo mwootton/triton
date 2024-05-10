@@ -4,10 +4,19 @@
 //#include "Driver/GPU/Cuda.h"
 #include "Driver/GPU/Roctracer.h"
 
+#include <roctracer/roctracer_ext.h>
+#include <roctracer/roctracer_hip.h>
+#include <roctracer/roctracer_hsa.h>
+
+
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <string.h>
+#include <mutex>
+
+#include <unistd.h> // FIXME
+#include <signal.h> // FIXME
 
 namespace proton {
 
@@ -35,6 +44,25 @@ typedef enum {
   HIP_OP_BARRIER_KIND_UNKNOWN_ = 0
 } hip_op_barrier_kind_t_;
 // end hip op defines
+
+namespace {
+
+class Flush
+{
+public:
+  std::mutex mutex_;
+  std::atomic<uint64_t> maxCorrelationId_;
+  uint64_t maxCompletedCorrelationId_ {0};
+  void reportCorrelation(const uint64_t &cid) {
+fprintf(stderr, "reportCorrelation: %ld\n", cid);
+    uint64_t prev = maxCorrelationId_;
+    while (prev < cid && !maxCorrelationId_.compare_exchange_weak(prev, cid))
+      {}
+  }
+};
+static Flush s_flush;
+
+}  // namespace
 
 
 std::shared_ptr<Metric> convertActivityToMetric(const roctracer_record_t *activity) {
@@ -81,12 +109,14 @@ void processActivityKernel(std::map<uint32_t, size_t> &correlation,
 } // namespace
 
 void RoctracerProfiler::startOp(const Scope &scope) {
+  fprintf(stderr, ">>>>>>>>>>>>>>>>>>>>>  %ld\n", scope.scopeId);
   roctracer::activity_push_external_correlation_id<true>(
       scope.scopeId);
 }
 
 void RoctracerProfiler::stopOp(const Scope &scope) {
   uint64_t correlationId;
+  fprintf(stderr, "<<<<<<<<<<<<<<<<<<<<<  %ld\n", scope.scopeId);
   roctracer::activity_pop_external_correlation_id<true>(
       &correlationId);
 }
@@ -98,163 +128,158 @@ void RoctracerProfiler::setOpInProgress(bool value) {
 bool RoctracerProfiler::isOpInProgress() { return roctracerState.isRecording; }
 
 void RoctracerProfiler::doStart() {
-  // magic
-  roctracer::set_properties<true>(ACTIVITY_DOMAIN_HIP_API, NULL);
+// Inline Callbacks
+  //roctracer::enable_domain_callback<true>(ACTIVITY_DOMAIN_HSA_API, api_callback, nullptr);
+  roctracer::enable_domain_callback<true>(ACTIVITY_DOMAIN_HIP_API, api_callback, nullptr);
 
-  //roctracer::enable_domain_callback<true>(ACTIVITY_DOMAIN_HIP_API, api_callback, NULL);
-
+  // Activity Records
   roctracer_properties_t properties;
   memset(&properties, 0, sizeof(roctracer_properties_t));
   properties.buffer_size = 0x1000;
   properties.buffer_callback_fun = activity_callback;
   roctracer::open_pool<true>(&properties);
-  roctracer::enable_domain_activity<true>(ACTIVITY_DOMAIN_HSA_API);
-  roctracer::enable_domain_activity<true>(ACTIVITY_DOMAIN_HIP_API);
   roctracer::enable_domain_activity<true>(ACTIVITY_DOMAIN_HIP_OPS);
-  roctracer::enable_domain_activity<true>(ACTIVITY_DOMAIN_EXT_API);
   roctracer::start();
+
+  fprintf(stderr, "===================  START\n");
 }
 
 void RoctracerProfiler::doFlush() {
-  // FIXME: stream synchronize?
-  roctracer::flush_activity<true>();
+  // Implement reliable flushing.  Wait for all dispatched ops to be reported
+  fprintf(stderr, "    +++ doFlush()\n");
+
+  //hipError_t err = hipDeviceSynchronize();
+  //roctracer::flush_activity<true>();
+
+  std::unique_lock<std::mutex> lock(s_flush.mutex_);
+
+  auto correlationId = s_flush.maxCorrelationId_.load();  // load ending id from the running max
+fprintf(stderr, "final: %ld\n", correlationId);
+fprintf(stderr, "completed: %ld\n", s_flush.maxCompletedCorrelationId_);
+
+  // Poll on the worker finding the final correlation id
+  int timeout = 20;
+  while ((s_flush.maxCompletedCorrelationId_ < correlationId) && --timeout) {
+    lock.unlock();
+    roctracer::flush_activity<true>();
+    usleep(100000);
+    lock.lock();
+    fprintf(stderr, "completed: %ld\n", s_flush.maxCompletedCorrelationId_);
+  }
+
+  fprintf(stderr, "    --- doFlush() timeout = %d\n", timeout);
 }
 
 void RoctracerProfiler::doStop() {
+  fprintf(stderr, "===================  STOP\n");
   roctracer::stop();
-  roctracer::disable_domain_activity<true>(ACTIVITY_DOMAIN_HSA_API);
-  roctracer::disable_domain_activity<true>(ACTIVITY_DOMAIN_HIP_API);
+  //roctracer::disable_domain_callback<true>(ACTIVITY_DOMAIN_HSA_API);
+  roctracer::disable_domain_callback<true>(ACTIVITY_DOMAIN_HIP_API);
   roctracer::disable_domain_activity<true>(ACTIVITY_DOMAIN_HIP_OPS);
-  roctracer::disable_domain_activity<true>(ACTIVITY_DOMAIN_EXT_API);
-  doFlush();
+  roctracer::close_pool<true>();
 }
 
+
 #if 0
-void RoctracerProfiler::allocBuffer(uint8_t **buffer, size_t *bufferSize,
-                                size_t *maxNumRecords) {
-  *buffer = reinterpret_cast<uint8_t *>(aligned_alloc(AlignSize, BufferSize));
-  if (*buffer == nullptr) {
-    throw std::runtime_error("aligned_alloc failed");
+void RoctracerProfiler::api_callback(uint32_t domain, uint32_t cid, const void* callback_data, void* arg)
+{
+  //fprintf(stderr, "%d::%d ", domain, cid);
+#if 0
+  if (domain == ACTIVITY_DOMAIN_HIP_API) {
+    //const hip_api_data_t* data = (const hip_api_data_t*)(callback_data);
+    //if (data->phase == ACTIVITY_API_PHASE_ENTER) {
+    if (false) {
+    }
+    else {
+          const hip_api_data_t* data = (const hip_api_data_t*)(callback_data);
+          fprintf(stderr, "%s hip <%s id(%u)\tcorrelation_id(%lu)>\n",
+          (data->phase == ACTIVITY_API_PHASE_ENTER) ? ">>>" : "<<<",
+          roctracer::op_string(ACTIVITY_DOMAIN_HIP_API, cid, 0),
+          cid,
+          data->correlation_id);
+    }
   }
-  *bufferSize = BufferSize;
-  *maxNumRecords = 0;
+  if (domain == ACTIVITY_DOMAIN_HSA_API) {
+          const hsa_api_data_t* data = (const hsa_api_data_t*)(callback_data);
+          fprintf(stderr, "%s HSA <%s id(%u)\tcorrelation_id(%lu)>\n",
+          (data->phase == ACTIVITY_API_PHASE_ENTER) ? ">>>" : "<<<",
+          roctracer::op_string(ACTIVITY_DOMAIN_HSA_API, cid, 0),
+          cid,
+          data->correlation_id);
+  }
+#endif
 }
 #endif
 
 void RoctracerProfiler::activity_callback(const char* begin, const char* end, void* arg)
 {
+  fprintf(stderr, "++++++++++++++++++  RoctracerProfiler::activity_callback\n");
   RoctracerProfiler &profiler =
       dynamic_cast<RoctracerProfiler &>(RoctracerProfiler::instance());
   auto &correlation = profiler.correlation;
   auto &dataSet = profiler.dataSet;
 
+  std::unique_lock<std::mutex> lock(s_flush.mutex_);
   const roctracer_record_t* record = (const roctracer_record_t*)(begin);
   const roctracer_record_t* end_record = (const roctracer_record_t*)(end);
 
   while (record < end_record) {
+    // Log latest completed correlation id.  Used to ensure we have flushed all data on stop
+    if (record->correlation_id > s_flush.maxCompletedCorrelationId_) {
+       s_flush.maxCompletedCorrelationId_ = record->correlation_id;
+    }
+    //fprintf(stderr, "record->op = %d    %d\n", record->op, record->device_id);
     processActivity(correlation, dataSet, record);
     roctracer::next_record<true>(record, &record);
   }
 }
 
-#if 0
-void RoctracerProfiler::completeBuffer(CUcontext ctx, uint32_t streamId,
-                                   uint8_t *buffer, size_t size,
-                                   size_t validSize) {
-  RoctracerProfiler &profiler =
-      dynamic_cast<RoctracerProfiler &>(RoctracerProfiler::instance());
-  auto &correlation = profiler.correlation;
-  auto &dataSet = profiler.dataSet;
-
-  CUptiResult status;
-  CUpti_Activity *activity = nullptr;
-  do {
-    status = cupti::activityGetNextRecord<false>(buffer, validSize, &activity);
-    if (status == CUPTI_SUCCESS) {
-      processActivity(correlation, dataSet, activity);
-    } else if (status == CUPTI_ERROR_MAX_LIMIT_REACHED) {
-      break;
-    } else {
-      throw std::runtime_error("cupti::activityGetNextRecord failed");
-    }
-  } while (true);
-
-  free(buffer);
-}
-#endif
-
 void RoctracerProfiler::processActivity(std::map<uint32_t, size_t> &correlation,
                                     std::set<Data *> &dataSet,
-                                    const roctracer_record_t *activity) {
-  const char *name = roctracer::op_string(activity->domain, activity->op, activity->kind);
-  fprintf(stderr, "%s\n", name);	// FIXME
-  switch (activity->kind) {
-    case 4242: { // FIXME, stupid ids not public
-      processActivityExternalCorrelation(correlation, activity);
-      break;
-    }
+                                    const roctracer_record_t *record) {
+  const char *name = roctracer::op_string(record->domain, record->op, record->kind);
+  //fprintf(stderr, "%s\n", name);	// FIXME
+  switch (record->kind) {
     case HIP_OP_DISPATCH_KIND_KERNEL_:
     case HIP_OP_DISPATCH_KIND_TASK_: {
-      processActivityKernel(correlation, dataSet, activity);
+      fprintf(stderr, "kernel/task: %s\tcorrelation_id(%lu)\n", record->kernel_name, record->correlation_id);  // FIXME
+      processActivityKernel(correlation, dataSet, record);
       break;
     }
     default:
-      fprintf(stderr, "%d\n", activity->kind);  // FIXME
+      ;
+      //fprintf(stderr, "           %s, %d\n", name, record->kind);  // FIXME
   }
 }
 
-#if 0
-void RoctracerProfiler::processActivity(std::map<uint32_t, size_t> &correlation,
-                                    std::set<Data *> &dataSet,
-                                    CUpti_Activity *activity) {
-  switch (activity->kind) {
-  case CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION: {
-    processActivityExternalCorrelation(correlation, activity);
-    break;
-  }
-  case CUPTI_ACTIVITY_KIND_KERNEL:
-  case CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL: {
-    processActivityKernel(correlation, dataSet, activity);
-    break;
-  }
-  default:
-    break;
-  }
-}
-#endif
-#if 0
 namespace {
 
-std::pair<bool, bool> matchKernelCbId(CUpti_CallbackId cbId) {
+std::pair<bool, bool> matchKernelCbId(uint32_t cbId) {
   bool isRuntimeApi = false;
   bool isDriverApi = false;
   switch (cbId) {
   // TODO: switch to directly subscribe the APIs
-  case CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_v3020:
-  case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_v7000:
-  case CUPTI_RUNTIME_TRACE_CBID_cudaLaunch_ptsz_v7000:
-  case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernel_ptsz_v7000:
-  case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060:
-  case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_ptsz_v11060:
-  case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernel_v9000:
-  case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernel_ptsz_v9000:
-  case CUPTI_RUNTIME_TRACE_CBID_cudaLaunchCooperativeKernelMultiDevice_v9000: {
+  case HIP_API_ID_hipExtLaunchKernel:
+  case HIP_API_ID_hipExtLaunchMultiKernelMultiDevice:
+  case HIP_API_ID_hipExtModuleLaunchKernel:
+  case HIP_API_ID_hipHccModuleLaunchKernel:
+  case HIP_API_ID_hipLaunchByPtr:
+  case HIP_API_ID_hipLaunchCooperativeKernel:
+  case HIP_API_ID_hipLaunchCooperativeKernelMultiDevice:
+  case HIP_API_ID_hipLaunchKernel:
+  case HIP_API_ID_hipModuleLaunchKernel:
+  case HIP_API_ID_hipGraphLaunch:
+  case HIP_API_ID_hipModuleLaunchCooperativeKernel:
+  case HIP_API_ID_hipModuleLaunchCooperativeKernelMultiDevice:
+  {
     isRuntimeApi = true;
     break;
   }
-  case CUPTI_DRIVER_TRACE_CBID_cuLaunch:
-  case CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid:
-  case CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync:
-  case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel:
-  case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz:
-  case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx:
-  case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx_ptsz:
-  case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel:
-  case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel_ptsz:
-  case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernelMultiDevice: {
-    isDriverApi = true;
-    break;
-  }
+  //case NO_HSA_GO_FISH:
+  //{
+  //  isDriverApi = true;
+  //  break;
+  //}
   default:
     break;
   }
@@ -263,34 +288,73 @@ std::pair<bool, bool> matchKernelCbId(CUpti_CallbackId cbId) {
 
 } // namespace
 
-void RoctracerProfiler::callback(void *userData, CUpti_CallbackDomain domain,
-                             CUpti_CallbackId cbId, const void *cbData) {
-  auto [isRuntimeAPI, isDriverAPI] = matchKernelCbId(cbId);
+void RoctracerProfiler::api_callback(uint32_t domain, uint32_t cid, const void* callback_data, void* arg)
+{
+#if 0
+  fprintf(stderr, "%d::%d ", domain, cid);
+  if (domain == ACTIVITY_DOMAIN_HIP_API) {
+    //const hip_api_data_t* data = (const hip_api_data_t*)(callback_data);
+    //if (data->phase == ACTIVITY_API_PHASE_ENTER) {
+    if (false) {
+    }
+    else {
+          const hip_api_data_t* data = (const hip_api_data_t*)(callback_data);
+          fprintf(stderr, "%s hip <%s id(%u)\tcorrelation_id(%lu)>\n",
+          (data->phase == ACTIVITY_API_PHASE_ENTER) ? ">>>" : "<<<",
+          roctracer::op_string(ACTIVITY_DOMAIN_HIP_API, cid, 0),
+          cid,
+          data->correlation_id);
+    }
+  }
+  if (domain == ACTIVITY_DOMAIN_HSA_API) {
+          const hsa_api_data_t* data = (const hsa_api_data_t*)(callback_data);
+          fprintf(stderr, "%s HSA <%s id(%u)\tcorrelation_id(%lu)>\n",
+          (data->phase == ACTIVITY_API_PHASE_ENTER) ? ">>>" : "<<<",
+          roctracer::op_string(ACTIVITY_DOMAIN_HSA_API, cid, 0),
+          cid,
+          data->correlation_id);
+  }
+#else
+
+  //
+  //
+  //
+  //fprintf(stderr, "%s ", roctracer::op_string(ACTIVITY_DOMAIN_HIP_API, cid, 0));
+  auto [isRuntimeAPI, isDriverAPI] = matchKernelCbId(cid);
   if (!(isRuntimeAPI || isDriverAPI)) {
     return;
   }
+  fprintf(stderr, "%s ", roctracer::op_string(ACTIVITY_DOMAIN_HIP_API, cid, 0));
+  fprintf(stderr, " isRuntimeAPI\n");
   RoctracerProfiler &profiler =
       dynamic_cast<RoctracerProfiler &>(RoctracerProfiler::instance());
-  const CUpti_CallbackData *callbackData =
-      reinterpret_cast<const CUpti_CallbackData *>(cbData);
-  if (callbackData->callbackSite == CUPTI_API_ENTER) {
-    if (callbackData->context && cuptiState.level == 0) {
-      // Valid context and outermost level of the kernel launch
-      auto scopeId = Scope::getNewScopeId();
-      auto scope = Scope(scopeId, callbackData->symbolName);
-      cuptiState.record(scope, profiler.getDataSetSnapshot());
-      cuptiState.enterOp();
-    }
-    cuptiState.level++;
-  } else if (callbackData->callbackSite == CUPTI_API_EXIT) {
-    cuptiState.level--;
-    if (cuptiState.level == 0) {
-      if (cuptiState.isRecording) {
-        cuptiState.exitOp();
+  if (domain == ACTIVITY_DOMAIN_HIP_API) {
+    const hip_api_data_t* data = (const hip_api_data_t*)(callback_data);
+    if (data->phase == ACTIVITY_API_PHASE_ENTER) {
+      //if (callbackData->context && roctracerState.level == 0) {
+      {
+        // Valid context and outermost level of the kernel launch
+        const char *name = roctracer::op_string(ACTIVITY_DOMAIN_HIP_API, cid, 0);
+        auto scopeId = Scope::getNewScopeId();
+        auto scope = Scope(scopeId, name);
+        roctracerState.record(scope, profiler.getDataSetSnapshot());
+        fprintf(stderr, "    scope++\n");
+        //roctracerState.enterOp();
       }
-      cuptiState.reset();
+      roctracerState.level++;
+    }
+    else if (data->phase == ACTIVITY_API_PHASE_EXIT) {
+      roctracerState.level--;
+      if (roctracerState.level == 0) {
+        if (roctracerState.isRecording) {
+          fprintf(stderr, "    scope\n");
+          //roctracerState.exitOp();
+        }
+        roctracerState.reset();
+      }
+      s_flush.reportCorrelation(data->correlation_id);
     }
   }
-}
 #endif
+}
 } // namespace proton

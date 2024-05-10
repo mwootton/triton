@@ -32,14 +32,11 @@ protected:
 private:
   //static void allocBuffer(uint8_t **buffer, size_t *bufferSize,
   //                        size_t *maxNumRecords);
-  //static void completeBuffer(CUcontext context, uint32_t streamId,
-  //                           uint8_t *buffer, size_t size, size_t validSize);
+  static void api_callback(uint32_t domain, uint32_t cid, const void* callback_data, void* arg);
   static void activity_callback(const char* begin, const char* end, void* arg);
   static void processActivity(std::map<uint32_t, size_t> &correlation,
                               std::set<Data *> &dataSet,
                               const roctracer_record_t *activity);
-  //static void callback(void *userData, CUpti_CallbackDomain domain,
-  //                     CUpti_CallbackId cbId, const void *cbData);
 
   const inline static size_t AlignSize = 8;
   const inline static size_t BufferSize = 64 * 1024 * 1024;

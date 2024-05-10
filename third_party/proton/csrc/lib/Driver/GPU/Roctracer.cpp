@@ -72,8 +72,16 @@ DEFINE_DISPATCH(ExternLibRoctracer, open_pool,
                 roctracer_open_pool,
                 const roctracer_properties_t*)
 
+DEFINE_DISPATCH(ExternLibRoctracer, open_pool_expl,
+                roctracer_open_pool_expl,
+                const roctracer_properties_t*, roctracer_pool_t**)
+
 DEFINE_DISPATCH(ExternLibRoctracer, close_pool,
                 roctracer_close_pool)
+
+DEFINE_DISPATCH(ExternLibRoctracer, close_pool_expl,
+                roctracer_close_pool_expl,
+                roctracer_pool_t*)
 
 DEFINE_DISPATCH(ExternLibRoctracer, enable_op_activity,
                 roctracer_enable_op_activity,
@@ -82,6 +90,10 @@ DEFINE_DISPATCH(ExternLibRoctracer, enable_op_activity,
 DEFINE_DISPATCH(ExternLibRoctracer, enable_domain_activity,
                 roctracer_enable_domain_activity,
                 activity_domain_t)
+
+DEFINE_DISPATCH(ExternLibRoctracer, enable_domain_activity_expl,
+                roctracer_enable_domain_activity_expl,
+                activity_domain_t, roctracer_pool_t*)
 
 DEFINE_DISPATCH(ExternLibRoctracer, disable_op_activity,
                 roctracer_disable_op_activity,
